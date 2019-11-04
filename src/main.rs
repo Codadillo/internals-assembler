@@ -1,4 +1,4 @@
-use argparse::{ArgumentParser, StoreOption};
+use argparse::{ArgumentParser, StoreOption, StoreTrue};
 use bitvec::prelude::*;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -111,8 +111,10 @@ impl Instruction {
         if op >= 16 {
             return Err("op must be four bits long");
         }
+        let mut op = BitVec::from_element(op);
+        op.drain(0..4);
         Ok(Self {
-            op: BitVec::from_element(op),
+            op,
             optional_args,
             valid_args,
         })
@@ -180,6 +182,7 @@ impl Instruction {
 fn main() {
     let mut assembly_filepath: Option<String> = None;
     let mut out_filepath: Option<String> = None;
+    let mut use_logism_format = false;
     {
         let mut ap = ArgumentParser::new();
         ap.set_description(
@@ -194,6 +197,11 @@ fn main() {
             &["-o", "--output"],
             StoreOption,
             "The path to the output file",
+        );
+        ap.refer(&mut use_logism_format).add_option(
+            &["-l", "--logism-out-format"],
+            StoreTrue,
+            "Whether or not have the output file be in logism ready format",
         );
         ap.parse_args_or_exit();
     }
@@ -251,10 +259,18 @@ fn main() {
             location += 1;
         }
     }
-    File::create(out_filepath.unwrap_or(format!("{}.lol", assembly_filepath)))
-        .expect("Could not write machine code to output")
-        .write_all(machine_code.as_slice())
-        .expect("Could not write machine code to output");
+    let mut out = File::create(out_filepath.unwrap_or(format!(
+        "{}.{}lol",
+        assembly_filepath,
+        if use_logism_format { "l" } else { "" }
+    )))
+    .expect("Could not load machine code output file");
+    if use_logism_format {
+        unimplemented!();
+    } else {
+        out.write_all(machine_code.as_slice())
+            .expect("Could not write machine code to output");
+    }
 }
 
 fn parse_arg(arg: &str) -> Result<(ArgumentType, u8), std::num::ParseIntError> {
@@ -274,32 +290,27 @@ fn parse_arg(arg: &str) -> Result<(ArgumentType, u8), std::num::ParseIntError> {
 #[test]
 fn test_arg_parse() {
     assert_eq!(parse_arg("r1"), Ok((ArgumentType::Register, 1)));
-    assert_eq!(parse_arg("%0x45"), Ok((ArgumentType::RAMAddress, 69)));
-    assert_eq!(parse_arg("0x31"), Ok((ArgumentType::Constant, 49)));
+    assert_eq!(parse_arg("%0x45"), Ok((ArgumentType::RAMAddress, 0x45)));
+    assert_eq!(parse_arg("0x31"), Ok((ArgumentType::Constant, 0x31)));
     assert_eq!(parse_arg("04"), Ok((ArgumentType::Constant, 04)));
     assert_eq!(parse_arg("%r3"), Ok((ArgumentType::PointerRegister, 3)));
     assert!(parse_arg("Hello").is_err());
+    assert!(parse_arg("%0").is_err());
 }
 
 #[test]
 fn test_assembly() {
-    fn out_from_vec(bin: Vec<u8>) -> BitVec<BigEndian, u8> {
+    fn out_from_vec(bin: Vec<u8>) -> Result<BitVec<BigEndian, u8>, String> {
         let mut b = BitVec::from_vec(bin);
         b.truncate(34);
-        b
+        Ok(b)
     }
     assert_eq!(
         INSTRUCTIONS["ADD"].build(vec![
             (ArgumentType::Register, 0),
             (ArgumentType::Constant, 3)
         ]),
-        Ok(out_from_vec(vec![
-            0b100010_00,
-            0b00_000000,
-            0b00_000000,
-            0b11_000000,
-            0
-        ]))
+        out_from_vec(vec![0b100010_00, 0b00_000000, 0b00_000000, 0b11_000000, 0])
     );
     assert_eq!(
         INSTRUCTIONS["SUB"].build(vec![
@@ -307,13 +318,13 @@ fn test_assembly() {
             (ArgumentType::RAMAddress, 200),
             (ArgumentType::Register, 3)
         ]),
-        Ok(out_from_vec(vec![
+        out_from_vec(vec![
             0b110100_00,
             0b01_000000,
             0b01_110010,
             0b00_000000,
             0b11_000000,
-        ]))
+        ])
     );
     assert!(INSTRUCTIONS["XOR"]
         .build(vec![
@@ -321,5 +332,16 @@ fn test_assembly() {
             (ArgumentType::Register, 2),
             (ArgumentType::RAMAddress, 8)
         ])
-        .is_err())
+        .is_err());
+    assert_eq!(
+        INSTRUCTIONS["J"].build(vec![(ArgumentType::Constant, 0)]),
+        out_from_vec(vec![0b101010_01, 0b11_000000, 0b00_000000, 0, 0,])
+    );
+    assert_eq!(
+        INSTRUCTIONS["JZ"].build(vec![
+            (ArgumentType::Constant, 15),
+            (ArgumentType::RAMAddress, 3)
+        ]),
+        out_from_vec(vec![0b101001_10, 0b00_000011, 0b11_000000, 0b11_000000, 0])
+    );
 }
