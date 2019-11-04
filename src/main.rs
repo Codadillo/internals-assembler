@@ -130,8 +130,7 @@ impl Instruction {
         let mut argument_descriptor_bin = BitVec::with_capacity(6);
         let mut argument_bin = BitVec::<BigEndian, u8>::with_capacity(24);
         while argument_descriptor_bin.len() / 2 < 3 - args.len() {
-            argument_descriptor_bin.push(true);
-            argument_descriptor_bin.push(false);
+            argument_descriptor_bin.extend(bitvec![1, 0]);
         }
         for (i, ((arg, value), valid_args)) in args.iter().zip(&self.valid_args).enumerate() {
             match valid_args {
@@ -161,9 +160,8 @@ impl Instruction {
                     }
                 }
             };
-            let a = arg.to_machine_code();
-            argument_descriptor_bin.push(a[0]);
-            argument_descriptor_bin.push(a[1]);
+            argument_descriptor_bin
+                .extend(BitVec::<BigEndian, u8>::from(&arg.to_machine_code()[..]));
             argument_bin.extend(BitVec::<BigEndian, u8>::from_element(*value));
         }
         if args.len() < 3 {
@@ -296,11 +294,12 @@ fn test_arg_parse() {
     assert_eq!(parse_arg("%r3"), Ok((ArgumentType::PointerRegister, 3)));
     assert!(parse_arg("Hello").is_err());
     assert!(parse_arg("%0").is_err());
+    assert!(parse_arg("%0x").is_err());
 }
 
 #[test]
 fn test_assembly() {
-    fn out_from_vec(bin: Vec<u8>) -> Result<BitVec<BigEndian, u8>, String> {
+    fn out_from_vec<T>(bin: Vec<u8>) -> Result<BitVec<BigEndian, u8>, T> {
         let mut b = BitVec::from_vec(bin);
         b.truncate(34);
         Ok(b)
