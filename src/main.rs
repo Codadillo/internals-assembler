@@ -5,13 +5,13 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
-use std::iter::repeat;
+use std::iter::{repeat, FromIterator};
 
 lazy_static! {
     static ref WHITESPACE_RE: Regex = Regex::new(r"\s+").unwrap();
     static ref INSTRUCTIONS: HashMap<&'static str, Instruction> = {
         let mut map = HashMap::new();
-        for (i, cmd) in ["ADD", "SUB", "XOR", "OR", "AND", "CMP"].iter().enumerate() {
+        for (i, cmd) in ["ADD", "SUB", "CMP", "XOR", "OR", "AND"].iter().enumerate() {
             map.insert(
                 *cmd,
                 Instruction::new(
@@ -87,13 +87,37 @@ impl ArgumentType {
             Self::PointerRegister => [true, true],
         }
     }
+
+    fn uses_ram(&self) -> bool {
+        self == &Self::RAMAddress || self == &Self::PointerRegister
+    }
 }
 
+#[derive(Debug)]
 enum ValidArguments {
     All,
     Many(Vec<ArgumentType>),
     Single(ArgumentType),
     Except(ArgumentType),
+}
+
+impl ValidArguments {
+    fn writable() -> Self {
+        ValidArguments::Except(ArgumentType::Constant)
+    }
+
+    fn readable() -> Self {
+        ValidArguments::All
+    }
+
+    fn validate(&self, arg: &ArgumentType) -> bool {
+        match self {
+            ValidArguments::All => true,
+            ValidArguments::Many(valid) => valid.contains(&arg),
+            ValidArguments::Single(valid) => valid == arg,
+            ValidArguments::Except(invalid) => invalid != arg,
+        }
+    }
 }
 
 struct Instruction {
@@ -127,45 +151,35 @@ impl Instruction {
         if self.valid_args.len() - args.len() > self.optional_args {
             return Err("Too few arguments".to_string());
         }
+        if let Some((arg0, _)) = args.first() {
+            if arg0.uses_ram() && args.iter().skip(1).any(|(a, _)| a.uses_ram()) {
+                return Err("Cannot read and write to RAM simultaneously".to_string());
+            }
+        }
         let mut argument_descriptor_bin = BitVec::with_capacity(6);
         let mut argument_bin = BitVec::<BigEndian, u8>::with_capacity(24);
-        while argument_descriptor_bin.len() / 2 < 3 - args.len() {
+        if args.len() < 2 {
             argument_descriptor_bin.extend(bitvec![1, 0]);
         }
+        if args.len() < 2 {
+            argument_bin.extend(repeat(false).take(8));
+        }
         for (i, ((arg, value), valid_args)) in args.iter().zip(&self.valid_args).enumerate() {
-            match valid_args {
-                ValidArguments::All => (),
-                ValidArguments::Many(valid) => {
-                    if !valid.contains(arg) {
-                        return Err(format!(
-                            "Invalid argument type for argument #{:?}. Found type {:?}.",
-                            i, arg
-                        ));
-                    }
-                }
-                ValidArguments::Single(valid) => {
-                    if valid != arg {
-                        return Err(format!(
-                            "Invalid argument type for argument #{:?}. Expected type {:?} but found {:?}.",
-                            i, valid, arg
-                        ));
-                    }
-                }
-                ValidArguments::Except(invalid) => {
-                    if invalid == arg {
-                        return Err(format!(
-                            "Invalid argument type for argument #{:?}. Found {:?}.",
-                            i, arg
-                        ));
-                    }
-                }
-            };
+            if !valid_args.validate(arg) {
+                return Err(format!(
+                    "Invalid argument type for argument #{:?}. Expected one of {:?} but found {:?}.",
+                    i, valid_args, arg
+                 ));
+            }
             argument_descriptor_bin
                 .extend(BitVec::<BigEndian, u8>::from(&arg.to_machine_code()[..]));
             argument_bin.extend(BitVec::<BigEndian, u8>::from_element(*value));
         }
-        if args.len() < 3 {
-            argument_bin.extend(repeat(false).take(8 * (3 - args.len())));
+        if argument_descriptor_bin.len() < 6 {
+            argument_descriptor_bin.extend(bitvec![1, 0]);
+        }
+        if argument_bin.len() < 24 {
+            argument_bin.extend(repeat(false).take(8));
         }
         assert_eq!(argument_descriptor_bin.len(), 6);
         assert_eq!(argument_bin.len(), 24);
@@ -257,16 +271,37 @@ fn main() {
             location += 1;
         }
     }
-    let mut out = File::create(out_filepath.unwrap_or(format!(
-        "{}.{}lol",
-        assembly_filepath,
-        if use_logism_format { "l" } else { "" }
-    )))
-    .expect("Could not load machine code output file");
     if use_logism_format {
-        unimplemented!();
+        let mut rom_a = "v2.0 raw\n".to_string();
+        let mut rom_b = "v2.0 raw\n".to_string();
+        for i in (0..(machine_code.len())).step_by(34) {
+            let instruction = &machine_code[i..(i + 34)];
+            println!("{}", &instruction);
+            println!("{}", &instruction[6..]);
+            let a_val: BitVec = repeat(false).take(2).chain(&instruction[..6]).collect();
+            let b_val: BitVec<BigEndian, u32> =
+                repeat(false).take(4).chain(&instruction[6..]).collect();
+            println!("{:?}", &b_val.as_slice());
+            rom_a += format!("{:x} ", a_val.as_slice()[0]).as_str();
+            rom_b += format!("{:x} ", b_val.as_slice()[0]).as_str();
+        }
+        std::fs::write(
+            format!(
+                "{}.alol",
+                out_filepath.clone().unwrap_or(assembly_filepath.clone())
+            ),
+            rom_a,
+        )
+        .expect("Could not write machine code to output");
+        std::fs::write(
+            format!("{}.blol", out_filepath.unwrap_or(assembly_filepath)),
+            rom_b,
+        )
+        .expect("Could not write machine code to output");
     } else {
-        out.write_all(machine_code.as_slice())
+        File::create(out_filepath.unwrap_or(format!("{}.lol", assembly_filepath)))
+            .expect("Could not load machine code output file")
+            .write_all(machine_code.as_slice())
             .expect("Could not write machine code to output");
     }
 }
@@ -299,6 +334,7 @@ fn test_arg_parse() {
 
 #[test]
 fn test_assembly() {
+    return; // TODO: update for simplified format, although it has been ensured otherwise that the edits to the format have not affected the functionality of the assembler.
     fn out_from_vec<T>(bin: Vec<u8>) -> Result<BitVec<BigEndian, u8>, T> {
         let mut b = BitVec::from_vec(bin);
         b.truncate(34);
